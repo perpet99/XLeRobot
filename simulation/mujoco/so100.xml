@@ -1,0 +1,132 @@
+<mujoco model="so100">
+  <compiler angle="radian" meshdir="./assets/"/>
+
+  <asset>
+    <material name="so100_orange" rgba="1.0 0.331 0.0 1.0" specular="0.1" shininess="0.1"/>
+    <material name="so100_black" rgba="0.1 0.1 0.1 1.0" specular="0.1" shininess="0.1"/>
+
+    <mesh name="Base" file="Base.stl"/>
+    <mesh name="Base_Motor" file="Base_Motor.stl"/>
+    <mesh name="Rotation_Pitch" file="Rotation_Pitch.stl"/>
+    <mesh name="Rotation_Pitch_Motor" file="Rotation_Pitch_Motor.stl"/>
+    <mesh name="Upper_Arm" file="Upper_Arm.stl"/>
+    <mesh name="Upper_Arm_Motor" file="Upper_Arm_Motor.stl"/>
+    <mesh name="Lower_Arm" file="Lower_Arm.stl"/>
+    <mesh name="Lower_Arm_Motor" file="Lower_Arm_Motor.stl"/>
+    <mesh name="Wrist_Pitch_Roll" file="Wrist_Pitch_Roll.stl"/>
+    <mesh name="Wrist_Pitch_Roll_Motor" file="Wrist_Pitch_Roll_Motor.stl"/>
+    <mesh name="Fixed_Jaw_part1" file="Fixed_Jaw_part1.stl"/>
+    <mesh name="Fixed_Jaw_part2" file="Fixed_Jaw_part2.stl"/>
+    <mesh name="Moving_Jaw_part1" file="Moving_Jaw_part1.stl"/>
+    <mesh name="Moving_Jaw_part2" file="Moving_Jaw_part2.stl"/>
+    <mesh name="Moving_Jaw_part3" file="Moving_Jaw_part3.stl"/>
+
+    <!-- convex collision hulls for the fingers; the *_part* meshes above are visual only -->
+    <mesh name="Fixed_Jaw_Collision_1" file="Fixed_Jaw_Collision_1.stl"/>
+    <mesh name="Fixed_Jaw_Collision_2" file="Fixed_Jaw_Collision_2.stl"/>
+    <mesh name="Moving_Jaw_Collision_1" file="Moving_Jaw_Collision_1.stl"/>
+    <mesh name="Moving_Jaw_Collision_2" file="Moving_Jaw_Collision_2.stl"/>
+    <mesh name="Moving_Jaw_Collision_3" file="Moving_Jaw_Collision_3.stl"/>
+  </asset>
+
+  <default>
+    <default class="so_arm100">
+      <joint frictionloss="0.1" armature="0.1"/>
+      <position kp="200" dampratio="1" forcerange="-35 35" ctrlrange="-3.14158 3.14158"/>
+      <!-- contype/conaffinity disable arm self-collision (the base shell and the
+           shoulder overlap by design) while keeping contact with the scene. -->
+      <geom contype="1" conaffinity="0" friction="1.0 0.02 0.001"/>
+      <default class="jaw_visual">
+        <geom contype="0" conaffinity="0" group="2"/>
+      </default>
+      <default class="jaw_collision">
+        <geom group="3" type="mesh" rgba="0.1 0.6 0.1 0.4"
+              friction="1.5 0.05 0.002" solimp="0.95 0.99 0.001" solref="0.005 1"/>
+      </default>
+      <default class="Rotation">
+        <position ctrlrange="-2.1 2.1"/>
+      </default>
+      <default class="Pitch">
+        <position ctrlrange="-0.1 3.45"/>
+      </default>
+      <default class="Elbow">
+        <position ctrlrange="-0.2 3.14158"/>
+      </default>
+      <default class="Wrist_Pitch">
+        <position ctrlrange="-1.8 1.8"/>
+      </default>
+      <default class="Wrist_Roll">
+        <position ctrlrange="-3.14158 3.14158"/>
+      </default>
+      <default class="Jaw">
+        <position ctrlrange="-0.2 2.0"/>
+      </default>
+    </default>
+  </default>
+
+  <worldbody>
+    <body name="Base" pos="0 0 0" childclass="so_arm100">
+      <geom type="mesh" rgba="0.3 0.3 0.3 1" mesh="Base"/>
+      <geom type="mesh" rgba="0.3 0.3 0.3 1" mesh="Base_Motor"/>
+
+      <body name="Rotation_Pitch" pos="0 -0.0452 0.0165" quat="0.707105 0.707108 0 0">
+        <inertial pos="-9.07886e-05 0.0590972 0.031089" quat="0.363978 0.441169 -0.623108 0.533504" mass="0.119226" diaginertia="5.94278e-05 5.89975e-05 3.13712e-05"/>
+        <joint name="shoulder_pan" pos="0 0 0" axis="0 -1 0" range="-2.1 2.1"/>
+        <geom type="mesh" rgba="0.3 0.3 0.3 1" mesh="Rotation_Pitch"/>
+        <geom type="mesh" rgba="0.3 0.3 0.3 1" mesh="Rotation_Pitch_Motor"/>
+
+        <body name="Upper_Arm" pos="0 0.1025 0.0306" quat="0.707105 0.707108 0 0">
+          <inertial pos="-1.72052e-05 0.0701802 0.00310545" quat="0.50104 0.498994 -0.493562 0.50632" mass="0.162409" diaginertia="0.000213312 0.000167164 7.01522e-05"/>
+          <joint name="shoulder_lift" pos="0 0 0" axis="-1 0 0" range="-0.1 3.45"/>
+          <geom type="mesh" rgba="0.3 0.3 0.3 1" mesh="Upper_Arm"/>
+          <geom type="mesh" rgba="0.3 0.3 0.3 1" mesh="Upper_Arm_Motor"/>
+
+          <body name="Lower_Arm" pos="0 0.11257 0.028" quat="0.707105 -0.707108 0 0">
+            <inertial pos="-0.00339604 0.00137796 0.0768007" quat="0.701995 0.0787996 0.0645626 0.704859" mass="0.147968" diaginertia="0.000138803 0.000107748 4.84242e-05"/>
+            <joint name="elbow_flex" pos="0 0 0" axis="1 0 0" range="-0.2 3.14159"/>
+            <geom type="mesh" rgba="0.3 0.3 0.3 1" mesh="Lower_Arm"/>
+            <geom type="mesh" rgba="0.3 0.3 0.3 1" mesh="Lower_Arm_Motor"/>
+
+            <body name="Wrist_Pitch_Roll" pos="0 0.0052 0.1349" quat="0.707105 -0.707108 0 0">
+              <inertial pos="-0.00852653 -0.0352279 -2.34622e-05" quat="-0.0522806 0.705235 0.0549524 0.704905" mass="0.0661321" diaginertia="3.45403e-05 2.39041e-05 1.94704e-05"/>
+              <joint name="wrist_flex" pos="0 0 0" axis="1 0 0" range="-1.8 1.8"/>
+              <geom type="mesh" rgba="0.3 0.3 0.3 1" mesh="Wrist_Pitch_Roll"/>
+              <geom type="mesh" rgba="0.3 0.3 0.3 1" mesh="Wrist_Pitch_Roll_Motor"/>
+
+              <body name="Fixed_Jaw" pos="0 -0.0601 0" quat="0.707105 0 0.707108 0">
+                <inertial pos="0.00552377 -0.0280167 0.000483583" quat="0.41836 0.620891 -0.350644 0.562599" mass="0.0929859" diaginertia="5.03136e-05 4.64098e-05 2.72961e-05"/>
+                <joint name="wrist_roll" pos="0 0 0" axis="0 -1 0" range="-3.14159 3.14159"/>
+                <geom class="jaw_visual" type="mesh" rgba="0.3 0.3 0.3 1" mesh="Fixed_Jaw_part1"/>
+                <geom class="jaw_visual" type="mesh" rgba="0.3 0.3 0.3 1" mesh="Fixed_Jaw_part2"/>
+                <geom class="jaw_collision" mesh="Fixed_Jaw_Collision_1"/>
+                <geom class="jaw_collision" mesh="Fixed_Jaw_Collision_2"/>
+                <!-- grasp centre: midway between the two fingers when the jaw is half open -->
+                <site name="grasp_centre" pos="-0.005 -0.086 0.0" size="0.004" rgba="1 0 0 0.5"/>
+
+                <body name="Moving_Jaw" pos="-0.0202 -0.0244 0" quat="3.45518e-07 -0.0940644 0.995566 -3.65692e-06">
+                  <inertial pos="-0.00161745 -0.0303473 0.000449646" quat="0.696562 0.716737 -0.0239844 -0.0227026" mass="0.0202444" diaginertia="1.11265e-05 8.99651e-06 2.99548e-06"/>
+                  <joint name="gripper" pos="0 0 0" axis="0 0 1" range="-0.2 2.0"/>
+                  <geom class="jaw_visual" type="mesh" rgba="0.1 0.1 0.1 1" mesh="Moving_Jaw_part1"/>
+                  <geom class="jaw_visual" type="mesh" rgba="0.1 0.1 0.1 1" mesh="Moving_Jaw_part2"/>
+                  <geom class="jaw_visual" type="mesh" rgba="0.1 0.1 0.1 1" mesh="Moving_Jaw_part3"/>
+                  <geom class="jaw_collision" mesh="Moving_Jaw_Collision_1"/>
+                  <geom class="jaw_collision" mesh="Moving_Jaw_Collision_2"/>
+                  <geom class="jaw_collision" mesh="Moving_Jaw_Collision_3"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <position class="Rotation"    name="shoulder_pan"  joint="shoulder_pan"/>
+    <position class="Pitch"       name="shoulder_lift" joint="shoulder_lift"/>
+    <position class="Elbow"       name="elbow_flex"    joint="elbow_flex"/>
+    <position class="Wrist_Pitch" name="wrist_flex"    joint="wrist_flex"/>
+    <position class="Wrist_Roll"  name="wrist_roll"    joint="wrist_roll"/>
+    <position class="Jaw"         name="gripper"       joint="gripper"/>
+  </actuator>
+</mujoco>

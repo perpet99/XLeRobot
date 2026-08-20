@@ -98,3 +98,8 @@ class XLeRobotController:
    - Step physics simulation
    - Render visualization (at 60 Hz)
 3. **Cleanup**: Close viewer on exit
+
+
+
+powershell -ExecutionPolicy Bypass -File "C:\Users\KOOBON~1\AppData\Local\Temp\claude\d--perpet-git-perpet-XLeRobot\74df4419-1e6a-41e9-ad34-f0608acee214\scratchpad\joycon_reset.ps1"
+

@@ -1,0 +1,11 @@
+# Minimal dependency set for so100_joycon_mujoco.py
+# (much smaller than requirements.txt, which pins the full XLeRobot sim stack)
+
+# simulation + viewer
+mujoco==3.3.0
+numpy>=1.24
+
+# Joy-Con support (joyconrobotics is vendored in ../../software/joyconrobotics)
+hidapi>=0.14
+PyGLM>=2.7
+scipy>=1.9
