@@ -9,8 +9,10 @@ IK as the real-robot examples in ``software/examples/``.
 The Joy-Con mapping follows leisaac's ``SO101JoyConEE`` device
 (``leisaac/devices/gamepad/joycon_ee_gamepad.py``), the ``joycon-ee`` option of
 ``teleop_se3_agent2.py``: the stick drives the end effector along the direction
-the controller points, the lateral offset drives ``shoulder_pan`` linearly, and
-the tilt sets the gripper pitch and wrist roll.
+the gripper faces, the lateral offset drives ``shoulder_pan`` linearly, and the
+tilt sets the gripper pitch and wrist roll. leisaac steers by the Joy-Con's own
+attitude here; this version follows the arm, so forward always means "further
+along the way the jaws point".
 
 Usage
 -----
@@ -26,7 +28,7 @@ random yaw; edit those constants to change the sampling box.
 
 Joy-Con (right) controls
 ------------------------
-    stick up/down     : end effector along the Joy-Con pointing direction (x+z)
+    stick up/down     : end effector along the gripper's facing direction (x+z)
     stick left/right  : end effector left / right (drives shoulder_pan)
     R                 : end effector up
     stick press       : end effector down
@@ -278,22 +280,22 @@ class JoyconSource:
             """Stick mapping of leisaac's ``FixedAxesJoyconRobotics``.
 
             The vertical stick moves the end effector along the direction the
-            Joy-Con points, so it drives x and z together; the horizontal stick
-            drives y on its own.
+            gripper currently faces, so it drives x and z together; the
+            horizontal stick drives y on its own.
             """
+
+            # Gripper pitch of the last command, written back by
+            # ``JoyconSource.apply()``. leisaac steers by ``direction_vector``,
+            # the way the *Joy-Con* points; this follows the arm instead.
+            gripper_pitch = HOME_PITCH
 
             def common_update(self):
                 speed = 0.0008
                 is_right = self.joycon.is_right()
 
-                # ``direction_vector`` is (cos(pitch)cos(yaw), .., sin(pitch)),
-                # refreshed by get_orientation() just before this call. It is an
-                # empty list until the first attitude update lands.
-                try:
-                    pointing_x = float(self.direction_vector[0])
-                    pointing_z = float(self.direction_vector[2])
-                except (TypeError, IndexError):
-                    pointing_x, pointing_z = 1.0, 0.0
+                # unit vector of the gripper in the arm's (forward, up) plane
+                pointing_x = math.cos(self.gripper_pitch)
+                pointing_z = math.sin(self.gripper_pitch)
 
                 stick_v = (
                     self.joycon.get_stick_right_vertical()
@@ -382,6 +384,9 @@ class JoyconSource:
         target.roll = clamp(roll * ROLL_GAIN, *JOINT_LIMITS["wrist_roll"])
         target.gripper_open = gripper == self._joycon.gripper_open
         target.clamp()
+        # feed the clamped gripper pitch back so the next stick step travels
+        # along the direction the gripper faces
+        self._joycon.gripper_pitch = target.pitch
 
     def close(self):
         try:

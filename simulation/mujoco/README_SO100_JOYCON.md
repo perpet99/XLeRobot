@@ -70,7 +70,7 @@ run_so100_joycon.bat
 
 | Input | Action |
 |---|---|
-| stick up / down | move along the direction the controller points (couples x and z) |
+| stick up / down | move along the direction the gripper faces (couples x and z) |
 | stick left / right | end effector left / right (drives `shoulder_pan`) |
 | `R` | end effector up |
 | stick press | end effector down |
@@ -126,9 +126,14 @@ together, so the same Joy-Con motion yields the same joint angle as in Isaac:
 | `roll_deg = roll * 50`, motor→USD ×1.6 | `ROLL_GAIN` | `1.396 rad/rad` |
 | gripper `60` / `20` motor deg, motor→USD ×1.1 −10 | `GRIPPER_OPEN` / `GRIPPER_CLOSED` | `0.977` / `0.209 rad` |
 
-The vertical stick is multiplied by `direction_vector`, the unit vector the
-Joy-Con points along, so it drives `x` and `z` together — tilt the controller up
-and the stick pushes the end effector up as well as forward.
+One deliberate deviation: leisaac multiplies the vertical stick by
+`direction_vector`, the unit vector the **Joy-Con** points along. Here the stick
+follows the **gripper** instead — `JoyconSource.apply()` writes the clamped
+command back to `FixedAxesJoycon.gripper_pitch`, and the stick travels along
+`(cos(pitch), sin(pitch))` in the arm's forward/up plane. Forward therefore
+always means "further along the way the jaws point", and because the gripper
+pitch is `PITCH_GAIN` (≈5×) the Joy-Con tilt, a small tilt steers the stick much
+more sharply than it did under leisaac's version.
 
 The IK positions the **wrist centre**, matching the real-robot examples. The
 `grasp_centre` site (small red dot) marks where an object ends up between the
