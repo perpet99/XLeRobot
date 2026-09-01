@@ -33,14 +33,29 @@ class AttitudeEstimator:
                 common_rad = True,
                 lerobot = False,
                 pitch_down_double = False,
-                lowpassfilter_alpha_rate = 0.05
+                lowpassfilter_alpha_rate = 0.05,
+                yaw_zupt = True,
+                yaw_zupt_threshold = 0.15,
+                yaw_bias_alpha = 0.002
                 ):
-        self.pitch = 0.0 
-        self.roll = 0.0   
-        self.yaw = 0.0   
-        self.dt = 0.01  
+        self.pitch = 0.0
+        self.roll = 0.0
+        self.yaw = 0.0
+        self.dt = 0.01
         self.alpha = 0.55
-        
+
+        # Zero-rate update. The accelerometer pins roll and pitch to gravity, but
+        # nothing observes yaw, so integrating it accumulates the gyro bias
+        # without bound. While the controller is still we freeze the integration
+        # and keep refining the bias estimate instead. The threshold is only a
+        # fallback: set_gyro_noise_floor() replaces it with a value measured from
+        # this particular controller during calibration.
+        self.yaw_zupt = yaw_zupt
+        self.yaw_zupt_threshold = yaw_zupt_threshold
+        self.yaw_bias_alpha = yaw_bias_alpha
+        self.gyro_bias = [0.0, 0.0, 0.0]
+        self.is_stationary = False
+
         self.yaw_diff = 0.0
         self.pitch_rad_T = pitch_Threhold
         self.roll_rad_T = roll_Threhold
@@ -67,7 +82,33 @@ class AttitudeEstimator:
         self.direction_Y = vec3(0, 1, 0)
         self.direction_Z = vec3(0, 0, 1)
         self.direction_Q = quat()
-    
+
+    def set_gyro_noise_floor(self, samples, margin=2.0, floor=0.02, verbose=True):
+        """Learn this controller's resting gyro bias and its ZUPT threshold.
+
+        ``samples`` are ``(gx, gy, gz)`` readings taken while the controller is
+        held still, so their mean is the bias and their spread sets the rate
+        below which the device should be treated as stationary. Measuring beats
+        assuming: the noise floor differs per controller and with temperature.
+        """
+        if not samples:
+            return
+
+        n = len(samples)
+        self.gyro_bias = [sum(s[i] for s in samples) / n for i in range(3)]
+        rates = [
+            math.sqrt(sum((s[i] - self.gyro_bias[i]) ** 2 for i in range(3))) for s in samples
+        ]
+        self.yaw_zupt_threshold = max(floor, margin * max(rates))
+
+        if verbose:
+            bias = ", ".join(f"{b:+.4f}" for b in self.gyro_bias)
+            print(
+                f"gyro bias [{bias}] rad/s, ZUPT threshold "
+                f"{self.yaw_zupt_threshold:.4f} rad/s (from {n} samples)"
+            )
+
+
     def set_yaw_diff(self,data):
         self.yaw_diff = data
         
@@ -99,15 +140,30 @@ class AttitudeEstimator:
         self.roll = self.lpf_roll.update(self.roll)
         
         # Yaw angle (updated by gyroscope)
-        rotation = angleAxis(gx * (-1/86), self.direction_X) \
-            * angleAxis(gy * (-1/86), self.direction_Y) \
-            * angleAxis(gz * (-1/86), self.direction_Z)
+        # Unlike roll and pitch above, nothing re-anchors yaw to an absolute
+        # reference, so every bit of gyro bias integrates into permanent drift.
+        # Subtract the measured bias, and while the controller is still, stop
+        # integrating altogether and refine that bias instead.
+        gxc = gx - self.gyro_bias[0]
+        gyc = gy - self.gyro_bias[1]
+        gzc = gz - self.gyro_bias[2]
 
-        self.direction_X *= rotation
-        self.direction_Y *= rotation
-        self.direction_Z *= rotation
-        self.direction_Q *= rotation        
-        
+        rate = math.sqrt(gxc * gxc + gyc * gyc + gzc * gzc)
+        self.is_stationary = self.yaw_zupt and rate < self.yaw_zupt_threshold
+
+        if self.is_stationary:
+            for i, g in enumerate((gx, gy, gz)):
+                self.gyro_bias[i] += self.yaw_bias_alpha * (g - self.gyro_bias[i])
+        else:
+            rotation = angleAxis(gxc * (-1/86), self.direction_X) \
+                * angleAxis(gyc * (-1/86), self.direction_Y) \
+                * angleAxis(gzc * (-1/86), self.direction_Z)
+
+            self.direction_X *= rotation
+            self.direction_Y *= rotation
+            self.direction_Z *= rotation
+            self.direction_Q *= rotation
+
         self.yaw = self.direction_X[1]
         
         if self.common_rad:
@@ -163,6 +219,7 @@ class JoyconRobotics:
                  pure_xz: bool = True,
                  change_down_to_gripper: bool = False, # ZR to toggle gripper state is common for lerobot, ARX ARM and VixperX. But for UR, Sawyer and panda you could try this. ZR to go down and stick button to toggle gripper
                  lowpassfilter_alpha_rate = 0.05,
+                 yaw_zupt: bool = True, # freeze the yaw integration while the controller is still, to stop it drifting
                  ):
         
         if device == "right":
@@ -180,7 +237,7 @@ class JoyconRobotics:
         self.lerobot = lerobot
         self.pitch_down_double = pitch_down_double
         self.rotation_filter_alpha_rate = rotation_filter_alpha_rate
-        self.orientation_sensor = AttitudeEstimator(common_rad=common_rad, lerobot=self.lerobot, pitch_down_double = self.pitch_down_double, lowpassfilter_alpha_rate = self.rotation_filter_alpha_rate)
+        self.orientation_sensor = AttitudeEstimator(common_rad=common_rad, lerobot=self.lerobot, pitch_down_double = self.pitch_down_double, lowpassfilter_alpha_rate = self.rotation_filter_alpha_rate, yaw_zupt = yaw_zupt)
         self.button = ButtonEventJoyCon(*self.joycon_id, track_sticks=True)
         self.without_rest_init = without_rest_init
         # print(f"connect to {device} joycon successful.")
@@ -241,12 +298,23 @@ class JoyconRobotics:
     
     def reset_joycon(self):
         
-        print(f"\033[33mcalibrating(2 seconds)..., please place it horizontally on the desktop.\033[0m")
+        print(f"\033[33mcalibrating(3 seconds)..., please place it horizontally on the desktop.\033[0m")
 
         self.gyro.calibrate()
-        time.sleep(2)
-        self.gyro.reset_orientation
+        time.sleep(2)  # the gyro applies its own offset at the end of this window
+
+        # The controller is already being held still, so use one more second of it
+        # to measure this device's post-calibration noise floor and yaw bias. Those
+        # drive the zero-rate update that keeps the yaw from drifting.
+        samples = []
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            samples.append(tuple(self.gyro.gyro_in_rad[0]))
+            time.sleep(0.005)
+
+        self.gyro.reset_orientation()  # note: this was missing its parentheses
         self.orientation_sensor.reset_yaw()
+        self.orientation_sensor.set_gyro_noise_floor(samples)
 
         print(f"\033[32mJoycon calibrations is complete.\033[0m")
     

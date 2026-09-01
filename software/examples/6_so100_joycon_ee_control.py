@@ -20,21 +20,25 @@ move faster than the arm without the motors being commanded to jump.
 Joy-Con (right) controls
 ------------------------
     stick up/down     : end effector along the gripper's facing direction
-    twist the Joy-Con : left / right rotation (drives shoulder_pan)
+    hold A + twist    : left / right rotation (drives shoulder_pan)
     stick left/right  : lateral trim added to the twist (off by default)
     R                 : end effector up
     stick press       : end effector down
     X / B             : fine forward / backward
     tilt the Joy-Con  : gripper pitch (nose up/down) and wrist roll
     ZR                : toggle gripper open/close
-    HOME              : reset the end effector position
+    HOME              : reset the end effector position and re-centre the pan
     PLUS              : re-calibrate the Joy-Con IMU and reset the position
     Ctrl+C            : stop
 
-Unlike pitch and roll, which the attitude estimator derives from gravity and so
-cannot drift, the yaw is a true gyro integration and creeps over time. Press
-PLUS to re-zero it whenever the arm sits off-centre with the Joy-Con held
-straight.
+The Joy-Con has a 6-axis IMU (accelerometer + gyroscope) and no magnetometer,
+so while gravity pins roll and pitch to an absolute reference, nothing observes
+yaw: integrating it accumulates gyro bias as permanent drift. The attitude
+estimator freezes that integration whenever the controller is still, and the A
+button acts as a clutch on top of it -- yaw only steers the arm while A is held,
+and each fresh press re-references from wherever the Joy-Con is now, the way
+lifting a mouse re-centres it. Drift therefore cannot build up across a session,
+only within a single hold.
 """
 
 import logging
@@ -90,9 +94,16 @@ PAN_PER_YAW = -50.0  # deg of shoulder_pan per rad of Joy-Con yaw
 # The horizontal stick adds a lateral trim on top of the twist. Set this to
 # 300.0 * 1.1 and PAN_PER_YAW to 0.0 to get the old stick-only steering back.
 PAN_PER_LAT = 0.0  # deg of shoulder_pan per metre of stick-accumulated offset
+
+# Clutch: yaw only steers the arm while this button is held, and every press
+# re-references from the Joy-Con's current heading. Set to False to let the yaw
+# steer continuously, at the cost of drift accumulating across the session.
+PAN_CLUTCH = True
 PITCH_GAIN = math.radians(300.0 * 0.95)  # rad of gripper pitch per rad of Joy-Con tilt
 PITCH_OFFSET = math.radians(20.0 * 0.95)  # nose-down bias with the Joy-Con held level
-ROLL_GAIN = math.radians(50.0 * 1.6)  # rad of wrist_roll per rad of Joy-Con roll
+# The trailing 4.0 amplifies leisaac's roll sensitivity, which is far too weak
+# on the real arm; drop it to go back to the original feel.
+ROLL_GAIN = math.radians(50.0 * 1.6 * 4.0)  # rad of wrist_roll per rad of Joy-Con roll
 
 # Gripper command in percent (lerobot normalises the gripper to 0..100).
 GRIPPER_OPEN = 60.0
@@ -386,10 +397,52 @@ class JoyconTeleop:
     def __init__(self, side="right"):
         self._joycon = FixedAxesJoyconRobotics(side, dof_speed=DOF_SPEED)
         self.name = f"joycon-{side}"
+        # Clutch state: the pan the arm keeps while the clutch is released, and
+        # the raw yaw it was referenced from when the clutch was last engaged.
+        self._held_yaw = HOME_YAW
+        self._yaw_ref = 0.0
+        self.clutch_engaged = False
+
+    def _clutch_pressed(self):
+        joycon = self._joycon.joycon
+        return (
+            joycon.get_button_a() == 1 if joycon.is_right() else joycon.get_button_left() == 1
+        )
+
+    def _steer_yaw(self, raw_yaw):
+        """Yaw the arm should follow, taking the clutch into account.
+
+        Without the clutch the raw yaw steers directly. With it, the arm only
+        turns while the button is held, and each press re-references from
+        wherever the Joy-Con is pointing now -- so the drift that built up while
+        the clutch was released is discarded instead of accumulating.
+        """
+        if not PAN_CLUTCH:
+            return raw_yaw
+
+        pressed = self._clutch_pressed()
+        if pressed and not self.clutch_engaged:
+            self._yaw_ref = raw_yaw  # re-reference on every fresh press
+        elif self.clutch_engaged and not pressed:
+            self._held_yaw = clamp(self._held_yaw + raw_yaw - self._yaw_ref, *YAW_RANGE)
+        self.clutch_engaged = pressed
+
+        if pressed:
+            return self._held_yaw + raw_yaw - self._yaw_ref
+        return self._held_yaw
+
+    def recentre(self):
+        """Forget the accumulated pan, so HOME brings the arm back to centre."""
+        self._held_yaw = HOME_YAW
+        self._yaw_ref = 0.0
+        self.clutch_engaged = False
 
     def apply(self, target: EETarget):
         pose, gripper, _ = self._joycon.get_control()
         dfwd, dlat, dup, roll, pitch, yaw = pose
+
+        if self._joycon.joycon.get_button_home() == 1:
+            self.recentre()
 
         target.fwd = HOME_FWD + dfwd
         target.lat = HOME_LAT + dlat
@@ -398,8 +451,7 @@ class JoyconTeleop:
         # ee_to_joint_targets().
         target.pitch = pitch * PITCH_GAIN - PITCH_OFFSET
         target.roll = roll * ROLL_GAIN
-        # absolute, not accumulated: the arm points where the Joy-Con points
-        target.yaw = yaw
+        target.yaw = self._steer_yaw(yaw)
         target.gripper_open = gripper == self._joycon.gripper_open
         target.clamp()
         # feed the clamped gripper pitch back so the next stick step travels
@@ -593,6 +645,7 @@ def p_control_loop(robot, teleop, target, kp=0.5, control_freq=50, status_hz=2.0
                 print(
                     f"fwd={target.fwd:.3f} up={target.up:.3f}"
                     f" pan={target_positions['shoulder_pan']:+6.1f}"
+                    f"{'*' if teleop.clutch_engaged else ' '}"
                     f" pitch={math.degrees(target.pitch):+6.1f}"
                     f" roll={math.degrees(target.roll):+6.1f}"
                     f" gripper={'open' if target.gripper_open else 'closed'}"
