@@ -1,23 +1,51 @@
 #!/usr/bin/env python3
 """
-Simplified keyboard control for SO100/SO101 robot
-Fixed action format conversion issues
-Uses P control, keyboard only changes target joint angles
+Joy-Con end-effector teleoperation for a real SO100/SO101 arm.
+
+The Joy-Con mapping is ported from ``simulation/mujoco/so100_joycon_mujoco.py``,
+which in turn follows leisaac's ``SO101JoyConEE`` device: the stick drives the
+end effector along the direction the gripper faces, the lateral offset drives
+``shoulder_pan`` linearly, and tilting the Joy-Con sets the gripper pitch and
+wrist roll.
+
+Unlike the simulation this file talks to real motors, so it keeps the joint
+conventions of the original hardware example: the analytic 2-link IK returns
+degrees, ``shoulder_lift`` is measured as ``90 - joint2`` and ``elbow_flex`` as
+``joint3 - 90``, and the wrist compensates both. Joint commands are therefore in
+degrees (lerobot's ``use_degrees=True`` default) and the gripper in percent.
+
+The arm is driven by P control towards the Cartesian target, so the target can
+move faster than the arm without the motors being commanded to jump.
+
+Joy-Con (right) controls
+------------------------
+    stick up/down     : end effector along the gripper's facing direction
+    stick left/right  : end effector left / right (drives shoulder_pan)
+    R                 : end effector up
+    stick press       : end effector down
+    X / B             : fine forward / backward
+    tilt the Joy-Con  : gripper pitch (nose up/down) and wrist roll
+    ZR                : toggle gripper open/close
+    HOME              : reset the end effector position
+    PLUS              : re-calibrate the Joy-Con IMU and reset the position
+    Ctrl+C            : stop
 """
 
 import logging
 import math
 import time
 import traceback
-from joyconrobotics import JoyconRobotics
 
+from joyconrobotics import JoyconRobotics
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# ----------------------------------------------------------------------------
 # Joint calibration coefficients - manually edited
 # Format: [joint_name, zero_position_offset(degrees), scale_factor]
+# ----------------------------------------------------------------------------
 JOINT_CALIBRATION = [
     ["shoulder_pan", 6.0, 1.0],  # Joint 1: zero position offset, scale factor
     ["shoulder_lift", 2.0, 0.97],  # Joint 2: zero position offset, scale factor
@@ -27,92 +55,75 @@ JOINT_CALIBRATION = [
     ["gripper", 0.0, 1.0],  # Joint 6: zero position offset, scale factor
 ]
 
-class FixedAxesJoyconRobotics(JoyconRobotics):
-    def common_update(self):
-        # 修改后的更新逻辑：摇杆只控制固定轴向
-        speed_scale = 0.0008
-        # pitch = -self.position[4] * 60 + 20
-        # print(f"pitch_ctrl: {pitch}")
-        # 垂直摇杆：只控制X轴（前后）
-        joycon_stick_v = self.joycon.get_stick_right_vertical() if self.joycon.is_right() else self.joycon.get_stick_left_vertical()
-        joycon_stick_v_0 = 1800
-        joycon_stick_v_threshold = 300
-        joycon_stick_v_range = 1000
-        if joycon_stick_v > joycon_stick_v_threshold + joycon_stick_v_0:
-            self.position[0] += speed_scale * (joycon_stick_v - joycon_stick_v_0) / joycon_stick_v_range *self.dof_speed[0] * self.direction_reverse[0] * self.direction_vector[0]
-            self.position[2] += speed_scale * (joycon_stick_v - joycon_stick_v_0) / joycon_stick_v_range *self.dof_speed[1] * self.direction_reverse[1] * self.direction_vector[2]
-        elif joycon_stick_v < joycon_stick_v_0 - joycon_stick_v_threshold:
-            self.position[0] += speed_scale * (joycon_stick_v - joycon_stick_v_0) / joycon_stick_v_range *self.dof_speed[0] * self.direction_reverse[0] * self.direction_vector[0]
-            self.position[2] += speed_scale * (joycon_stick_v - joycon_stick_v_0) / joycon_stick_v_range *self.dof_speed[1] * self.direction_reverse[1] * self.direction_vector[2]
-        
-        # 水平摇杆：只控制Y轴（左右）  
-        joycon_stick_h = self.joycon.get_stick_right_horizontal() if self.joycon.is_right() else self.joycon.get_stick_left_horizontal()
-        joycon_stick_h_0 = 2000
-        joycon_stick_h_threshold = 300
-        joycon_stick_h_range = 1000
-        if joycon_stick_h > joycon_stick_h_threshold + joycon_stick_h_0:
-            self.position[1] += speed_scale * (joycon_stick_h - joycon_stick_h_0) / joycon_stick_h_range * self.dof_speed[1] * self.direction_reverse[1]
-        elif joycon_stick_h < joycon_stick_h_0 - joycon_stick_h_threshold:
-            self.position[1] += speed_scale * (joycon_stick_h - joycon_stick_h_0) / joycon_stick_h_range * self.dof_speed[1] * self.direction_reverse[1]
-        
-        # Z轴只通过按钮控制
-        joycon_button_up = self.joycon.get_button_r() if self.joycon.is_right() else self.joycon.get_button_l()
-        if joycon_button_up == 1:
-            self.position[2] += speed_scale * self.dof_speed[2] * self.direction_reverse[2]
-        
-        joycon_button_down = self.joycon.get_button_r_stick() if self.joycon.is_right() else self.joycon.get_button_l_stick()
-        if joycon_button_down == 1:
-            self.position[2] -= speed_scale * self.dof_speed[2] * self.direction_reverse[2]
+# ----------------------------------------------------------------------------
+# Arm geometry (metres). Both lengths are measured from the shoulder-pitch axis,
+# which is the frame the IK below works in.
+# ----------------------------------------------------------------------------
+L1 = 0.1159  # upper arm
+L2 = 0.1350  # lower arm
 
-        # 其他按钮控制（复制原来的逻辑）
-        joycon_button_xup = self.joycon.get_button_x() if self.joycon.is_right() else self.joycon.get_button_up()
-        joycon_button_xback = self.joycon.get_button_b() if self.joycon.is_right() else self.joycon.get_button_down()
-        if joycon_button_xup == 1:
-            self.position[0] += 0.001 * self.dof_speed[0]
-        elif joycon_button_xback == 1:
-            self.position[0] -= 0.001 * self.dof_speed[0]
-        
-        # Home按钮重置逻辑（简化版）
-        joycon_button_home = self.joycon.get_button_home() if self.joycon.is_right() else self.joycon.get_button_capture()
-        if joycon_button_home == 1:
-            self.position = self.offset_position_m.copy()
-        
-        # 夹爪控制逻辑（复制原来的）
-        for event_type, status in self.button.events():
-            if (self.joycon.is_right() and event_type == 'plus' and status == 1) or (self.joycon.is_left() and event_type == 'minus' and status == 1):
-                self.reset_button = 1
-                self.reset_joycon()
-            elif self.joycon.is_right() and event_type == 'a':
-                self.next_episode_button = status
-            elif self.joycon.is_right() and event_type == 'y':
-                self.restart_episode_button = status
-            elif ((self.joycon.is_right() and event_type == 'zr') or (self.joycon.is_left() and event_type == 'zl')) and not self.change_down_to_gripper:
-                self.gripper_toggle_button = status
-            elif ((self.joycon.is_right() and event_type == 'stick_r_btn') or (self.joycon.is_left() and event_type == 'stick_l_btn')) and self.change_down_to_gripper:
-                self.gripper_toggle_button = status
-            else: 
-                self.reset_button = 0
-            
-        if self.gripper_toggle_button == 1 :
-            if self.gripper_state == self.gripper_open:
-                self.gripper_state = self.gripper_close
-            else:
-                self.gripper_state = self.gripper_open
-            self.gripper_toggle_button = 0
+# ----------------------------------------------------------------------------
+# Joy-Con -> joint mapping, ported from leisaac's ``SO101JoyConEE``
+# ----------------------------------------------------------------------------
+# leisaac emits motor-space degrees which are rescaled into the follower's joint
+# limits; the constants below fold both steps together, so the same Joy-Con
+# motion produces the same joint angle as it does in Isaac and in the MuJoCo
+# simulation.
+#
+#   shoulder_pan  = 300 deg/m   * lateral, motor (-100,100) -> (-110,110)
+#   gripper pitch = 300 deg/rad * pitch - 20 deg bias, scale 190/200
+#   wrist_roll    =  50 deg/rad * roll,   motor (-100,100) -> (-160,160)
+PAN_PER_LAT = 300.0 * 1.1  # deg of shoulder_pan per metre of lateral offset
+PITCH_GAIN = math.radians(300.0 * 0.95)  # rad of gripper pitch per rad of Joy-Con tilt
+PITCH_OFFSET = math.radians(20.0 * 0.95)  # nose-down bias with the Joy-Con held level
+ROLL_GAIN = math.radians(50.0 * 1.6)  # rad of wrist_roll per rad of Joy-Con roll
 
-        # 按钮控制状态
-        if self.joycon.is_right():
-            if self.next_episode_button == 1:
-                self.button_control = 1
-            elif self.restart_episode_button == 1:
-                self.button_control = -1
-            elif self.reset_button == 1:
-                self.button_control = 8
-            else:
-                self.button_control = 0
-        
-        return self.position, self.gripper_state, self.button_control
+# Gripper command in percent (lerobot normalises the gripper to 0..100).
+GRIPPER_OPEN = 60.0
+GRIPPER_CLOSED = 0.0
 
+# Stick handling. The centre values are raw ADC counts and differ between
+# Joy-Cons; read yours with ``joycon_test_read_CN.py`` if the arm drifts with the
+# stick released.
+STICK_V_CENTER = 1800
+STICK_H_CENTER = 2000
+STICK_DEADZONE = 300
+STICK_RANGE = 1000
+STICK_SPEED = 0.0008  # metres per control tick at full stick deflection
+FINE_STEP = 0.001  # metres per tick for the X / B buttons
+DOF_SPEED = [2, 2, 2, 1, 1, 1]
+
+# Direction of the horizontal stick. The simulation negates both this and the
+# shoulder_pan sign to match its scene; on the real arm both stay positive,
+# which is the direction the original hardware example used.
+STICK_LAT_SIGN = 1.0
+
+# Home end-effector pose, measured from the shoulder-pitch axis.
+HOME_FWD = 0.1629
+HOME_LAT = 0.0
+HOME_UP = 0.1131
+HOME_PITCH = -PITCH_OFFSET  # gripper pitch, rad, 0 = horizontal, + = nose up
+HOME_ROLL = 0.0
+
+# Cartesian workspace clamp (metres / radians), keeps the IK inside a sane
+# region. The arm reaches L1 + L2 = 0.251 m, and the IK scales anything beyond
+# that back onto the boundary.
+FWD_RANGE = (0.03, 0.31)
+LAT_RANGE = (-0.28, 0.28)
+UP_RANGE = (-0.10, 0.30)
+PITCH_RANGE = (math.radians(-95.0), math.radians(95.0))
+ROLL_RANGE = (math.radians(-160.0), math.radians(160.0))
+
+# Joint clamps in degrees, derived from the SO101 calibration travel.
+JOINT_LIMITS_DEG = {
+    "shoulder_pan": (-110.0, 110.0),
+    "wrist_flex": (-95.0, 95.0),
+    "wrist_roll": (-160.0, 160.0),
+}
+
+
+def clamp(value, low, high):
+    return max(low, min(high, value))
 
 
 def apply_joint_calibration(joint_name, raw_position):
@@ -135,7 +146,7 @@ def apply_joint_calibration(joint_name, raw_position):
     return raw_position  # if no calibration coefficient found, return original value
 
 
-def inverse_kinematics(x, y, l1=0.1159, l2=0.1350):
+def inverse_kinematics(x, y, l1=L1, l2=L2):
     """
     Calculate inverse kinematics for a 2-link robotic arm, considering joint offsets
 
@@ -146,7 +157,7 @@ def inverse_kinematics(x, y, l1=0.1159, l2=0.1350):
         l2: Lower arm length (default 0.1350 m)
 
     Returns:
-        joint2, joint3: Joint angles in radians as defined in the URDF file
+        joint2, joint3: Joint angles in degrees as used by the follower
     """
     # Calculate joint2 and joint3 offsets in theta1 and theta2
     theta1_offset = math.atan2(0.028, 0.11257)  # theta1 offset when joint2=0
@@ -175,7 +186,7 @@ def inverse_kinematics(x, y, l1=0.1159, l2=0.1350):
     cos_theta2 = -(r**2 - l1**2 - l2**2) / (2 * l1 * l2)
 
     # Calculate theta2 (elbow angle)
-    theta2 = math.pi - math.acos(cos_theta2)
+    theta2 = math.pi - math.acos(clamp(cos_theta2, -1.0, 1.0))
 
     # Calculate theta1 (shoulder angle)
     beta = math.atan2(y, x)
@@ -187,17 +198,194 @@ def inverse_kinematics(x, y, l1=0.1159, l2=0.1350):
     joint3 = theta2 + theta2_offset
 
     # Ensure angles are within URDF limits
-    joint2 = max(-0.1, min(3.45, joint2))
-    joint3 = max(-0.2, min(math.pi, joint3))
+    joint2 = clamp(joint2, -0.1, 3.45)
+    joint3 = clamp(joint3, -0.2, math.pi)
 
     # Convert from radians to degrees
-    joint2_deg = math.degrees(joint2)
-    joint3_deg = math.degrees(joint3)
-
-    joint2_deg = 90 - joint2_deg
-    joint3_deg = joint3_deg - 90
+    joint2_deg = 90 - math.degrees(joint2)
+    joint3_deg = math.degrees(joint3) - 90
 
     return joint2_deg, joint3_deg
+
+
+def ee_to_joint_targets(fwd, lat, up, pitch, roll):
+    """Map a Cartesian end-effector command to the six SO100 joint targets.
+
+    ``fwd`` / ``lat`` / ``up`` are metres measured from the shoulder-pitch axis;
+    ``pitch`` and ``roll`` are radians, ``pitch`` being the gripper pitch with
+    0 = horizontal and + = nose up.
+
+    Like leisaac, the lateral offset drives ``shoulder_pan`` linearly instead of
+    pointing the arm at a Cartesian target, so the IK sees ``fwd`` alone as the
+    reach.
+    """
+    pan = clamp(lat * PAN_PER_LAT, *JOINT_LIMITS_DEG["shoulder_pan"])
+
+    shoulder_lift, elbow_flex = inverse_kinematics(fwd, up)
+
+    # In this joint convention the wrist compensates the shoulder/elbow pair, and
+    # a nose-up gripper pitch bends it the other way.
+    wrist_flex = clamp(
+        -shoulder_lift - elbow_flex - math.degrees(pitch), *JOINT_LIMITS_DEG["wrist_flex"]
+    )
+    wrist_roll = clamp(math.degrees(roll), *JOINT_LIMITS_DEG["wrist_roll"])
+
+    return {
+        "shoulder_pan": pan,
+        "shoulder_lift": shoulder_lift,
+        "elbow_flex": elbow_flex,
+        "wrist_flex": wrist_flex,
+        "wrist_roll": wrist_roll,
+    }
+
+
+class EETarget:
+    """Mutable Cartesian end-effector target."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.fwd = HOME_FWD
+        self.lat = HOME_LAT
+        self.up = HOME_UP
+        self.pitch = HOME_PITCH
+        self.roll = HOME_ROLL
+        self.gripper_open = True
+
+    def clamp(self):
+        self.fwd = clamp(self.fwd, *FWD_RANGE)
+        self.lat = clamp(self.lat, *LAT_RANGE)
+        self.up = clamp(self.up, *UP_RANGE)
+        self.pitch = clamp(self.pitch, *PITCH_RANGE)
+        self.roll = clamp(self.roll, *ROLL_RANGE)
+
+    def joint_targets(self):
+        targets = ee_to_joint_targets(self.fwd, self.lat, self.up, self.pitch, self.roll)
+        targets["gripper"] = GRIPPER_OPEN if self.gripper_open else GRIPPER_CLOSED
+        return targets
+
+
+class FixedAxesJoyconRobotics(JoyconRobotics):
+    """Stick mapping ported from ``so100_joycon_mujoco.py``.
+
+    The vertical stick moves the end effector along the direction the gripper
+    currently faces, so it drives forward and height together; the horizontal
+    stick drives the lateral offset on its own.
+    """
+
+    # Gripper pitch (rad) of the last command, written back by
+    # ``JoyconTeleop.apply()``. leisaac steers by the way the *Joy-Con* points;
+    # this follows the arm instead, so forward always means "further along the
+    # way the jaws point".
+    gripper_pitch = HOME_PITCH
+
+    def common_update(self):
+        is_right = self.joycon.is_right()
+
+        # unit vector of the gripper in the arm's (forward, up) plane
+        pointing_fwd = math.cos(self.gripper_pitch)
+        pointing_up = math.sin(self.gripper_pitch)
+
+        stick_v = (
+            self.joycon.get_stick_right_vertical()
+            if is_right
+            else self.joycon.get_stick_left_vertical()
+        )
+        if abs(stick_v - STICK_V_CENTER) > STICK_DEADZONE:
+            delta_v = STICK_SPEED * (stick_v - STICK_V_CENTER) / STICK_RANGE
+            self.position[0] += (
+                delta_v * self.dof_speed[0] * self.direction_reverse[0] * pointing_fwd
+            )
+            # leisaac indexes dof_speed / direction_reverse with 1 here
+            self.position[2] += (
+                delta_v * self.dof_speed[1] * self.direction_reverse[1] * pointing_up
+            )
+
+        stick_h = (
+            self.joycon.get_stick_right_horizontal()
+            if is_right
+            else self.joycon.get_stick_left_horizontal()
+        )
+        if abs(stick_h - STICK_H_CENTER) > STICK_DEADZONE:
+            self.position[1] += (
+                STICK_SPEED * (stick_h - STICK_H_CENTER) / STICK_RANGE
+                * self.dof_speed[1] * self.direction_reverse[1] * STICK_LAT_SIGN
+            )
+
+        up = self.joycon.get_button_r() if is_right else self.joycon.get_button_l()
+        if up == 1:
+            self.position[2] += STICK_SPEED * self.dof_speed[2] * self.direction_reverse[2]
+        down = (
+            self.joycon.get_button_r_stick() if is_right else self.joycon.get_button_l_stick()
+        )
+        if down == 1:
+            self.position[2] -= STICK_SPEED * self.dof_speed[2] * self.direction_reverse[2]
+
+        fine_fwd = self.joycon.get_button_x() if is_right else self.joycon.get_button_up()
+        fine_back = self.joycon.get_button_b() if is_right else self.joycon.get_button_down()
+        if fine_fwd == 1:
+            self.position[0] += FINE_STEP * self.dof_speed[0]
+        elif fine_back == 1:
+            self.position[0] -= FINE_STEP * self.dof_speed[0]
+
+        home = self.joycon.get_button_home() if is_right else self.joycon.get_button_capture()
+        if home == 1:
+            self.position = self.offset_position_m.copy()
+
+        self.button_control = 0
+        for event_type, status in self.button.events():
+            zr_pressed = (is_right and event_type == "zr") or (
+                not is_right and event_type == "zl"
+            )
+            if zr_pressed and status == 1:
+                self.gripper_state = (
+                    self.gripper_close
+                    if self.gripper_state == self.gripper_open
+                    else self.gripper_open
+                )
+            # leisaac maps PLUS to an IMU re-calibration; A / Y drive the episode
+            # recorder there, which has no counterpart here.
+            recalibrate = (is_right and event_type == "plus") or (
+                not is_right and event_type == "minus"
+            )
+            if recalibrate and status == 1:
+                self.position = self.offset_position_m.copy()
+                self.reset_joycon()
+                self.button_control = 8
+
+        return self.position, self.gripper_state, self.button_control
+
+
+class JoyconTeleop:
+    """Joy-Con teleop using leisaac's ``SO101JoyConEE`` mapping."""
+
+    def __init__(self, side="right"):
+        self._joycon = FixedAxesJoyconRobotics(side, dof_speed=DOF_SPEED)
+        self.name = f"joycon-{side}"
+
+    def apply(self, target: EETarget):
+        pose, gripper, _ = self._joycon.get_control()
+        dfwd, dlat, dup, roll, pitch, _yaw = pose
+
+        target.fwd = HOME_FWD + dfwd
+        target.lat = HOME_LAT + dlat
+        target.up = HOME_UP + dup
+        # leisaac: pitch_deg = -pitch * 300 + 20, folded into the wrist by
+        # ee_to_joint_targets().
+        target.pitch = pitch * PITCH_GAIN - PITCH_OFFSET
+        target.roll = roll * ROLL_GAIN
+        target.gripper_open = gripper == self._joycon.gripper_open
+        target.clamp()
+        # feed the clamped gripper pitch back so the next stick step travels
+        # along the direction the gripper faces
+        self._joycon.gripper_pitch = target.pitch
+
+    def close(self):
+        try:
+            self._joycon.disconnect()
+        except Exception:
+            pass
 
 
 def move_to_zero_position(robot, duration=3.0, kp=0.5):
@@ -210,16 +398,6 @@ def move_to_zero_position(robot, duration=3.0, kp=0.5):
         kp: proportional gain
     """
     print("Using P control to slowly move robot to zero position...")
-
-    # Get current robot state
-    current_obs = robot.get_observation()
-
-    # Extract current joint positions
-    current_positions = {}
-    for key, value in current_obs.items():
-        if key.endswith(".pos"):
-            motor_name = key.removesuffix(".pos")
-            current_positions[motor_name] = value
 
     # Zero position targets
     zero_positions = {
@@ -248,8 +426,7 @@ def move_to_zero_position(robot, duration=3.0, kp=0.5):
             if key.endswith(".pos"):
                 motor_name = key.removesuffix(".pos")
                 # Apply calibration coefficients
-                calibrated_value = apply_joint_calibration(motor_name, value)
-                current_positions[motor_name] = calibrated_value
+                current_positions[motor_name] = apply_joint_calibration(motor_name, value)
 
         # P control calculation
         robot_action = {}
@@ -333,63 +510,30 @@ def return_to_start_position(robot, start_positions, kp=0.5, control_freq=50):
     print("Return to start position completed")
 
 
-def p_control_loop(
-    robot, keyboard, target_positions, start_positions, current_x, current_y, joyconrobotics_right, kp=0.5, control_freq=50
-):
+def p_control_loop(robot, teleop, target, kp=0.5, control_freq=50, status_hz=2.0):
     """
     P control loop
 
     Args:
         robot: robot instance
-        keyboard: keyboard instance
-        target_positions: target joint position dictionary
-        start_positions: start joint position dictionary
-        current_x: current x coordinate
-        current_y: current y coordinate
-        joyconrobotics_right: joycon robotics instance
+        teleop: teleop source writing into ``target``
+        target: Cartesian end-effector target
         kp: proportional gain
         control_freq: control frequency (Hz)
+        status_hz: how often the current command is printed
     """
     control_period = 1.0 / control_freq
-
-    # Initialize pitch control variables
-    pitch = 0.0  # Initial pitch adjustment
-    pitch_step = 1  # Pitch adjustment step size
+    status_period = 1.0 / status_hz if status_hz > 0 else None
+    next_status = time.perf_counter()
 
     print(f"Starting P control loop, control frequency: {control_freq}Hz, proportional gain: {kp}")
 
     while True:
         try:
-            # Get keyboard input
-            keyboard_action = keyboard.get_action()
+            # Read the Joy-Con and update the Cartesian target
+            teleop.apply(target)
+            target_positions = target.joint_targets()
 
-            pose, gripper, control_button = joyconrobotics_right.get_control()
-            x, y, z, roll_, pitch_, yaw = pose
-            pitch = -pitch_ * 120 + 60
-            current_x = 0.1629 + x
-            current_y = 0.1131 + z
-            roll = roll_ * 50 
-            print(f"pitch: {pitch}")
-            
-            # 添加y值控制shoulder_pan关节
-            # y值直接映射到shoulder_pan的目标位置，可以调整缩放因子
-            y_scale = 300.0  # 缩放因子，可以根据需要调整
-            target_positions["shoulder_pan"] = y * y_scale
-            
-            # Calculate target angles for joint2 and joint3
-            joint2_target, joint3_target = inverse_kinematics(current_x, current_y)
-            target_positions["shoulder_lift"] = joint2_target
-            target_positions["elbow_flex"] = joint3_target 
-            # target_positions["shoulder_lift"] = joint2_target + pitch
-            # target_positions["elbow_flex"] = joint3_target + pitch
-            target_positions["wrist_flex"] = -target_positions["shoulder_lift"] - target_positions["elbow_flex"] + pitch
-            target_positions["wrist_roll"] = roll
-
-            if gripper == 1:
-                target_positions["gripper"] = 60
-            else:
-                target_positions["gripper"] = 0
-            
             # Get current robot state
             current_obs = robot.get_observation()
 
@@ -399,8 +543,7 @@ def p_control_loop(
                 if key.endswith(".pos"):
                     motor_name = key.removesuffix(".pos")
                     # Apply calibration coefficients
-                    calibrated_value = apply_joint_calibration(motor_name, value)
-                    current_positions[motor_name] = calibrated_value
+                    current_positions[motor_name] = apply_joint_calibration(motor_name, value)
 
             # P control calculation
             robot_action = {}
@@ -420,6 +563,15 @@ def p_control_loop(
             if robot_action:
                 robot.send_action(robot_action)
 
+            if status_period is not None and time.perf_counter() >= next_status:
+                next_status += status_period
+                print(
+                    f"fwd={target.fwd:.3f} lat={target.lat:+.3f} up={target.up:.3f}"
+                    f" pitch={math.degrees(target.pitch):+6.1f}"
+                    f" roll={math.degrees(target.roll):+6.1f}"
+                    f" gripper={'open' if target.gripper_open else 'closed'}"
+                )
+
             time.sleep(control_period)
 
         except KeyboardInterrupt:
@@ -433,19 +585,15 @@ def p_control_loop(
 
 def main():
     """Main function"""
-    print("LeRobot Simplified Keyboard Control Example (P Control)")
+    print("SO100/SO101 Joy-Con End-Effector Teleoperation (P Control)")
     print("=" * 50)
 
+    teleop = None
+    robot = None
     try:
         # Import necessary modules
-        # from lerobot.robots.so100_follower import SO100Follower, SO100FollowerConfig
-
         from lerobot.robots.so_follower.so_follower import SO100Follower
         from lerobot.robots.so_follower.config_so_follower import SO100FollowerConfig
-        # from lerobot.teleoperators.keyboard import KeyboardTeleop, KeyboardTeleopConfig
-
-        from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
-        from lerobot.teleoperators.keyboard.configuration_keyboard import KeyboardTeleopConfig
 
         # Get port
         port = input("Please enter the USB port for SO100 robot (e.g., /dev/ttyACM0): ").strip()
@@ -461,31 +609,8 @@ def main():
         robot_config = SO100FollowerConfig(port=port)
         robot = SO100Follower(robot_config)
 
-        # Configure keyboard
-        keyboard_config = KeyboardTeleopConfig()
-        keyboard = KeyboardTeleop(keyboard_config)
-
         # Connect devices
         robot.connect()
-        keyboard.connect()
-        # 使用修改后的控制类
-        joyconrobotics_right = FixedAxesJoyconRobotics(
-            "right",
-            rotation_filter_alpha_rate=1.5, 
-            dof_speed=[2, 2, 2, 1, 1, 1]
-        )
-
-        print("固定轴向控制测试:")
-        print("垂直摇杆: 只控制X轴（前后）")  
-        print("水平摇杆: 只控制Y轴（左右）")
-        print("R按钮: Z轴上升")
-        print("摇杆按钮: Z轴下降")
-        print("Home按钮: 重置位置")
-        print("ZR按钮: 切换夹爪")
-        print("按Ctrl+C停止")
-        print()
-
-
         print("Device connection successful!")
 
         # Ask whether to recalibrate
@@ -513,47 +638,26 @@ def main():
 
         print("Initial joint angles:")
         for joint_name, position in start_positions.items():
-            print(f"  {joint_name}: {position}°")
+            print(f"  {joint_name}: {position}")
 
         # Move to zero position
         move_to_zero_position(robot, duration=3.0)
 
-        # Initialize target positions as current positions (integers)
-        target_positions = {
-            "shoulder_pan": 0.0,
-            "shoulder_lift": 0.0,
-            "elbow_flex": 0.0,
-            "wrist_flex": 0.0,
-            "wrist_roll": 0.0,
-            "gripper": 0.0,
-        }
+        # Connect the Joy-Con only once the arm is in a known pose
+        teleop = JoyconTeleop("right")
+        print(f"teleop source: {teleop.name}")
+        print(__doc__.split("Joy-Con (right) controls", 1)[1])
 
-        # Initialize x,y coordinate control
-        x0, y0 = 0.1629, 0.1131
-        current_x, current_y = x0, y0
-        print(f"Initialize end effector position: x={current_x:.4f}, y={current_y:.4f}")
-
-        print("Keyboard control instructions:")
-        print("- Q/A: Joint 1 (shoulder_pan) decrease/increase")
-        print("- W/S: Control end effector x coordinate (joint2+3)")
-        print("- E/D: Control end effector y coordinate (joint2+3)")
-        print("- R/F: Pitch adjustment increase/decrease (affects wrist_flex)")
-        print("- T/G: Joint 5 (wrist_roll) decrease/increase")
-        print("- Y/H: Joint 6 (gripper) decrease/increase")
-        print("- X: Exit program (return to start position first)")
-        print("- ESC: Exit program")
+        target = EETarget()
+        print(
+            f"Initialize end effector position: fwd={target.fwd:.4f} "
+            f"lat={target.lat:+.4f} up={target.up:.4f}"
+        )
         print("=" * 50)
         print("Note: Robot will continuously move to target positions")
 
         # Start P control loop
-        p_control_loop(
-            robot, keyboard, target_positions, start_positions, current_x, current_y, joyconrobotics_right, kp=0.5, control_freq=50
-        )
-
-        # Disconnect
-        robot.disconnect()
-        keyboard.disconnect()
-        print("Program ended")
+        p_control_loop(robot, teleop, target, kp=0.5, control_freq=50)
 
     except Exception as e:
         print(f"Program execution failed: {e}")
@@ -563,6 +667,15 @@ def main():
         print("2. Whether the USB port is correct")
         print("3. Whether you have sufficient permissions to access USB devices")
         print("4. Whether the robot is properly configured")
+    finally:
+        if teleop is not None:
+            teleop.close()
+        if robot is not None:
+            try:
+                robot.disconnect()
+            except Exception:
+                pass
+        print("Program ended")
 
 
 if __name__ == "__main__":
