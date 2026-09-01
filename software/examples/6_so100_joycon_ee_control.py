@@ -20,7 +20,8 @@ move faster than the arm without the motors being commanded to jump.
 Joy-Con (right) controls
 ------------------------
     stick up/down     : end effector along the gripper's facing direction
-    stick left/right  : end effector left / right (drives shoulder_pan)
+    twist the Joy-Con : left / right rotation (drives shoulder_pan)
+    stick left/right  : lateral trim added to the twist (off by default)
     R                 : end effector up
     stick press       : end effector down
     X / B             : fine forward / backward
@@ -29,6 +30,11 @@ Joy-Con (right) controls
     HOME              : reset the end effector position
     PLUS              : re-calibrate the Joy-Con IMU and reset the position
     Ctrl+C            : stop
+
+Unlike pitch and roll, which the attitude estimator derives from gravity and so
+cannot drift, the yaw is a true gyro integration and creeps over time. Press
+PLUS to re-zero it whenever the arm sits off-centre with the Joy-Con held
+straight.
 """
 
 import logging
@@ -70,10 +76,20 @@ L2 = 0.1350  # lower arm
 # motion produces the same joint angle as it does in Isaac and in the MuJoCo
 # simulation.
 #
-#   shoulder_pan  = 300 deg/m   * lateral, motor (-100,100) -> (-110,110)
 #   gripper pitch = 300 deg/rad * pitch - 20 deg bias, scale 190/200
 #   wrist_roll    =  50 deg/rad * roll,   motor (-100,100) -> (-160,160)
-PAN_PER_LAT = 300.0 * 1.1  # deg of shoulder_pan per metre of lateral offset
+#
+# shoulder_pan departs from leisaac here: instead of the horizontal stick it
+# follows the Joy-Con's own yaw, so twisting the controller swings the arm the
+# same way. The attitude estimator already scales its yaw by pi/1.5, so a 1:1
+# feel would be roughly 27 deg/rad; 50 lets a comfortable wrist twist cover the
+# whole joint.
+# Negative because the arm pans the opposite way to the estimator's yaw sign;
+# flip it back to positive to reverse the rotation direction.
+PAN_PER_YAW = -50.0  # deg of shoulder_pan per rad of Joy-Con yaw
+# The horizontal stick adds a lateral trim on top of the twist. Set this to
+# 300.0 * 1.1 and PAN_PER_YAW to 0.0 to get the old stick-only steering back.
+PAN_PER_LAT = 0.0  # deg of shoulder_pan per metre of stick-accumulated offset
 PITCH_GAIN = math.radians(300.0 * 0.95)  # rad of gripper pitch per rad of Joy-Con tilt
 PITCH_OFFSET = math.radians(20.0 * 0.95)  # nose-down bias with the Joy-Con held level
 ROLL_GAIN = math.radians(50.0 * 1.6)  # rad of wrist_roll per rad of Joy-Con roll
@@ -104,6 +120,7 @@ HOME_LAT = 0.0
 HOME_UP = 0.1131
 HOME_PITCH = -PITCH_OFFSET  # gripper pitch, rad, 0 = horizontal, + = nose up
 HOME_ROLL = 0.0
+HOME_YAW = 0.0
 
 # Cartesian workspace clamp (metres / radians), keeps the IK inside a sane
 # region. The arm reaches L1 + L2 = 0.251 m, and the IK scales anything beyond
@@ -113,6 +130,7 @@ LAT_RANGE = (-0.28, 0.28)
 UP_RANGE = (-0.10, 0.30)
 PITCH_RANGE = (math.radians(-95.0), math.radians(95.0))
 ROLL_RANGE = (math.radians(-160.0), math.radians(160.0))
+YAW_RANGE = (-2.2, 2.2)  # +-110 deg of shoulder_pan at PAN_PER_YAW = 50
 
 # Joint clamps in degrees, derived from the SO101 calibration travel.
 JOINT_LIMITS_DEG = {
@@ -208,18 +226,19 @@ def inverse_kinematics(x, y, l1=L1, l2=L2):
     return joint2_deg, joint3_deg
 
 
-def ee_to_joint_targets(fwd, lat, up, pitch, roll):
+def ee_to_joint_targets(fwd, lat, up, pitch, roll, yaw):
     """Map a Cartesian end-effector command to the six SO100 joint targets.
 
     ``fwd`` / ``lat`` / ``up`` are metres measured from the shoulder-pitch axis;
-    ``pitch`` and ``roll`` are radians, ``pitch`` being the gripper pitch with
-    0 = horizontal and + = nose up.
+    ``pitch``, ``roll`` and ``yaw`` are radians, ``pitch`` being the gripper
+    pitch with 0 = horizontal and + = nose up.
 
-    Like leisaac, the lateral offset drives ``shoulder_pan`` linearly instead of
-    pointing the arm at a Cartesian target, so the IK sees ``fwd`` alone as the
-    reach.
+    ``shoulder_pan`` is driven by ``yaw`` (plus the optional stick trim in
+    ``lat``) rather than by pointing the arm at a Cartesian target, so the IK
+    sees ``fwd`` alone as the reach. Because the reach is measured in the arm's
+    own plane, panning does not disturb it.
     """
-    pan = clamp(lat * PAN_PER_LAT, *JOINT_LIMITS_DEG["shoulder_pan"])
+    pan = clamp(yaw * PAN_PER_YAW + lat * PAN_PER_LAT, *JOINT_LIMITS_DEG["shoulder_pan"])
 
     shoulder_lift, elbow_flex = inverse_kinematics(fwd, up)
 
@@ -251,6 +270,7 @@ class EETarget:
         self.up = HOME_UP
         self.pitch = HOME_PITCH
         self.roll = HOME_ROLL
+        self.yaw = HOME_YAW
         self.gripper_open = True
 
     def clamp(self):
@@ -259,9 +279,12 @@ class EETarget:
         self.up = clamp(self.up, *UP_RANGE)
         self.pitch = clamp(self.pitch, *PITCH_RANGE)
         self.roll = clamp(self.roll, *ROLL_RANGE)
+        self.yaw = clamp(self.yaw, *YAW_RANGE)
 
     def joint_targets(self):
-        targets = ee_to_joint_targets(self.fwd, self.lat, self.up, self.pitch, self.roll)
+        targets = ee_to_joint_targets(
+            self.fwd, self.lat, self.up, self.pitch, self.roll, self.yaw
+        )
         targets["gripper"] = GRIPPER_OPEN if self.gripper_open else GRIPPER_CLOSED
         return targets
 
@@ -366,7 +389,7 @@ class JoyconTeleop:
 
     def apply(self, target: EETarget):
         pose, gripper, _ = self._joycon.get_control()
-        dfwd, dlat, dup, roll, pitch, _yaw = pose
+        dfwd, dlat, dup, roll, pitch, yaw = pose
 
         target.fwd = HOME_FWD + dfwd
         target.lat = HOME_LAT + dlat
@@ -375,6 +398,8 @@ class JoyconTeleop:
         # ee_to_joint_targets().
         target.pitch = pitch * PITCH_GAIN - PITCH_OFFSET
         target.roll = roll * ROLL_GAIN
+        # absolute, not accumulated: the arm points where the Joy-Con points
+        target.yaw = yaw
         target.gripper_open = gripper == self._joycon.gripper_open
         target.clamp()
         # feed the clamped gripper pitch back so the next stick step travels
@@ -566,7 +591,8 @@ def p_control_loop(robot, teleop, target, kp=0.5, control_freq=50, status_hz=2.0
             if status_period is not None and time.perf_counter() >= next_status:
                 next_status += status_period
                 print(
-                    f"fwd={target.fwd:.3f} lat={target.lat:+.3f} up={target.up:.3f}"
+                    f"fwd={target.fwd:.3f} up={target.up:.3f}"
+                    f" pan={target_positions['shoulder_pan']:+6.1f}"
                     f" pitch={math.degrees(target.pitch):+6.1f}"
                     f" roll={math.degrees(target.roll):+6.1f}"
                     f" gripper={'open' if target.gripper_open else 'closed'}"
