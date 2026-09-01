@@ -114,6 +114,11 @@ ROLL_GAIN = math.radians(50.0 * 1.6)  # rad of wrist_roll per rad of Joy-Con rol
 GRIPPER_OPEN = math.radians(60.0 * 1.1 - 10.0)
 GRIPPER_CLOSED = math.radians(20.0 * 1.1 - 10.0)
 
+# Direction of the horizontal stick. Set to +1.0 for leisaac's direction.
+# ``direction_reverse[1]`` would do this too, but the vertical stick borrows that
+# same index for its z term, so flipping it there would tilt the stick as well.
+STICK_LAT_SIGN = -1.0
+
 # Home end-effector pose, relative to the pan axis (forward, lateral, height).
 # The offsets match leisaac's rest-pose calibration (``_x0`` / ``_z0``).
 HOME_FWD = SHOULDER_FWD + 0.1629
@@ -320,7 +325,7 @@ class JoyconSource:
                 if abs(stick_h - 2000) > 300:
                     self.position[1] += (
                         speed * (stick_h - 2000) / 1000 * self.dof_speed[1]
-                        * self.direction_reverse[1]
+                        * self.direction_reverse[1] * STICK_LAT_SIGN
                     )
 
                 up = self.joycon.get_button_r() if is_right else self.joycon.get_button_l()

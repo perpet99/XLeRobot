@@ -28,9 +28,11 @@ class JoyCon:
             raise ValueError(f'product_id is invalid: {product_id!r}')
         
         # Allow either standard serial format or non-standard MAC address format
-        is_standard_serial = serial[:12] in JOYCON_SERIAL_HEAD
-        is_mac_address = len(serial) == 17 and serial.count(':') == 5
-        if not (is_standard_serial or is_mac_address):
+        is_standard_serial = bool(serial) and serial[:12] in JOYCON_SERIAL_HEAD
+        is_mac_address = bool(serial) and len(serial) == 17 and serial.count(':') == 5
+        # Windows hidapi reports the MAC without separators, e.g. '862536005a10'
+        is_bare_mac = bool(serial) and len(serial) == 12 and all(c in '0123456789abcdefABCDEF' for c in serial)
+        if not (is_standard_serial or is_mac_address or is_bare_mac):
             raise ValueError(f'serial is invalid: {serial!r}')
 
         self.vendor_id   = vendor_id
@@ -38,7 +40,7 @@ class JoyCon:
         self.serial      = serial
         self.simple_mode = simple_mode  # TODO: It's for reporting mode 0x3f
         
-        if serial[:12] not in JOYCON_SERIAL_HEAD:
+        if not is_standard_serial:
             self.calibrate_value = True
         else:
             self.calibrate_value = False

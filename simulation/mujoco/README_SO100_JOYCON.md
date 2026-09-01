@@ -71,7 +71,7 @@ run_so100_joycon.bat
 | Input | Action |
 |---|---|
 | stick up / down | move along the direction the gripper faces (couples x and z) |
-| stick left / right | end effector left / right (drives `shoulder_pan`) |
+| stick left / right | end effector left / right (drives `shoulder_pan`, sign from `STICK_LAT_SIGN`) |
 | `R` | end effector up |
 | stick press | end effector down |
 | `X` / `B` | fine forward / backward |

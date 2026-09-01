@@ -224,8 +224,11 @@ class JoyconRobotics:
         
         # Allow both standard and non-standard serial formats for robotics
         if device_serial != JOYCON_SERIAL_SUPPORT and self.joycon_id != None:
-            # Check if it's a valid MAC address format (alternative serial format)
-            if len(self.joycon_id[2]) != 17 or self.joycon_id[2].count(':') != 5:
+            # Alternative serial formats: colon-separated MAC (Linux) or bare MAC (Windows)
+            joycon_serial = self.joycon_id[2] or ''
+            is_mac_address = len(joycon_serial) == 17 and joycon_serial.count(':') == 5
+            is_bare_mac = len(joycon_serial) == 12 and all(c in '0123456789abcdefABCDEF' for c in joycon_serial)
+            if not (is_mac_address or is_bare_mac):
                 raise IOError("There is no joycon for robotics")
         
         self.running = True

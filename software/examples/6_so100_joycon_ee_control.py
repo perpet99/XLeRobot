@@ -365,7 +365,7 @@ def p_control_loop(
 
             pose, gripper, control_button = joyconrobotics_right.get_control()
             x, y, z, roll_, pitch_, yaw = pose
-            pitch = -pitch_ * 60 + 20
+            pitch = -pitch_ * 120 + 60
             current_x = 0.1629 + x
             current_y = 0.1131 + z
             roll = roll_ * 50 
@@ -471,6 +471,7 @@ def main():
         # 使用修改后的控制类
         joyconrobotics_right = FixedAxesJoyconRobotics(
             "right",
+            rotation_filter_alpha_rate=1.5, 
             dof_speed=[2, 2, 2, 1, 1, 1]
         )
 
